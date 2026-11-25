@@ -97,6 +97,29 @@
 </div>
 
 <div class="card">
+  <label>快照 / 恢复（每次写入前自动存一份）</label>
+  <div class="row">
+    <button id="btnSnap" disabled>抓取当前快照</button>
+    <button id="btnExportSnaps">导出 JSON</button>
+    <button id="btnImportSnaps">导入 JSON</button>
+    <input type="file" id="fileImport" accept="application/json" style="display:none" />
+  </div>
+  <div id="snapList" style="margin-top:10px"></div>
+  <div class="row" style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+    <div style="flex:1;min-width:130px">
+      <label>手动写回 Profile（hex）</label>
+      <input id="manualProfile" placeholder="例如 31" />
+    </div>
+    <div style="flex:1;min-width:130px">
+      <label>手动写回 0x92（hex）</label>
+      <input id="manualCfg" placeholder="例如 91" />
+    </div>
+    <button id="btnManualRestore" class="danger" disabled>写回</button>
+  </div>
+  <div class="sub" style="margin:8px 0 0">快照存在本机浏览器里（localStorage），换浏览器/清缓存会丢，重要数据请导出 JSON。</div>
+</div>
+
+<div class="card">
   <label>配对 / 换密钥（车端需按键确认）</label>
   <div class="row">
     <button id="btnPair" class="danger" disabled>生成新密钥并 SET_PWD</button>
@@ -414,6 +437,8 @@ function setConnected(name){
 function markAuth(){
   $('btnAuth').disabled=true; $('btnReadAll').disabled=false;
   $('btnWriteProfile').disabled=false; $('btnWriteCfg').disabled=false; $('btnReread').disabled=false; $('btnPair').disabled=false;
+  $('btnSnap').disabled=false; $('btnManualRestore').disabled=false;
+  renderSnaps();
 }
 
 $('btnConnect').onclick = async ()=>{
@@ -445,7 +470,11 @@ $('btnAuth').onclick = async ()=>{
     await link.auth(pwd);
     log('AUTH 成功，已建立 Encryption2 会话','t-ok');
     markAuth();
-  }catch(e){ log('AUTH 失败：'+e.message,'t-err'); }
+  }catch(e){
+    log('AUTH 失败：'+e.message,'t-err');
+    if(/超时/.test(e.message)) log('提示：密码不对时车端不会回包，表现就是超时。若这辆车以前用旧工具「配对/换密钥」改过密码，这里要填当时生成的那串新密钥。','t-dim');
+    if(/拒绝/.test(e.message)) log('提示：车端明确拒绝，说明密码与车上的不一致。','t-dim');
+  }
 };
 
 $('btnReadAll').onclick = async ()=>{
@@ -468,10 +497,118 @@ $('btnReadAll').onclick = async ()=>{
   }catch(e){ log('读取失败：'+e.message,'t-err'); }
 };
 
+/* ---------------- 快照 / 恢复 ---------------- */
+const SNAP_KEY = 'bfg_snapshots_v1', MAX_SNAPS = 50;
+function loadSnaps(){ try{ const a = JSON.parse(localStorage.getItem(SNAP_KEY) || '[]'); return Array.isArray(a) ? a : [] }catch(e){ return [] } }
+function storeSnaps(a){ try{ localStorage.setItem(SNAP_KEY, JSON.stringify(a.slice(0, MAX_SNAPS))) }catch(e){ log('快照保存失败：'+e.message,'t-err') } }
+function fmtTime(t){ const d = new Date(t), p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}` }
+function hex2(v){ return '0x' + Number(v).toString(16).toUpperCase().padStart(2,'0') }
+function snapDesc(s){
+  if(s.profile == null) return '-';
+  const v = VOLT_BY_CODE[s.profile & 0x0F] || '?';
+  const cap = CAP_TABLE[(s.profile >> 4) & 0x0F];
+  return `${hex2(s.profile)} = ${v}V / ${cap} mAh`;
+}
+function renderSnaps(){
+  const list = $('snapList'), arr = loadSnaps();
+  if(!arr.length){ list.innerHTML = '<div class="sub">还没有快照。每次写入前会自动存一份。</div>'; return }
+  list.innerHTML = arr.map((s, i) => `
+    <div class="row" style="justify-content:space-between;border-bottom:1px solid var(--line);padding:6px 0">
+      <div style="font-size:12px;line-height:1.5">
+        <div>${fmtTime(s.t)} · ${s.tag || ''}${s.sn ? ' · ' + s.sn : ''}</div>
+        <div style="color:var(--dim)">profile ${snapDesc(s)} · 0x92 ${s.cfg != null ? hex2(s.cfg) : '-'} · 0x1C ${s.core != null ? s.core : '-'}</div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button data-restore="${i}" ${link.authorized ? '' : 'disabled'}>恢复</button>
+        <button data-del="${i}">删</button>
+      </div>
+    </div>`).join('');
+}
+async function takeSnapshot(tag){
+  const p = await link.readReg(GROUP_PROFILE, 0x00, 1);
+  const core = await link.readReg(GROUP_PROFILE, 0x1C, 2);
+  const cfg = await link.readReg(GROUP_DIS, 0x92, 2);
+  const snap = { t: Date.now(), tag, sn: link.sn || '', profile: p[0], core: le16(core, 0), cfg: cfg[0], cfgRaw: toHex(cfg) };
+  const arr = loadSnaps(); arr.unshift(snap); storeSnaps(arr); renderSnaps();
+  log(`快照已保存（${tag}）：profile ${hex2(snap.profile)}，0x92 ${hex2(snap.cfg)}，0x1C ${snap.core}`, 't-ok');
+  return snap;
+}
+async function applySnapshot(s){
+  const out = [];
+  if(s.profile != null){
+    await link.writeProf(s.profile);
+    const back = await link.readReg(GROUP_PROFILE, 0x00, 1);
+    out.push(`profile ${hex2(back[0])} ${back[0] === s.profile ? '✓' : '✗ 未生效'}`);
+  }
+  if(s.cfg != null){
+    await link.writeCfg(s.cfg);
+    const back = await link.readReg(GROUP_DIS, 0x92, 2);
+    out.push(`0x92 ${hex2(back[0])} ${back[0] === s.cfg ? '✓' : '✗ 未生效'}`);
+  }
+  const bad = out.some(x => x.includes('✗'));
+  log('恢复结果：' + out.join(' · '), bad ? 't-err' : 't-ok');
+}
+
+$('snapList').onclick = async (ev) => {
+  const el = ev.target; if(!(el instanceof HTMLElement)) return;
+  const arr = loadSnaps();
+  if(el.dataset.restore != null){
+    const s = arr[+el.dataset.restore];
+    if(!s) return;
+    if(!confirm('把这条快照写回车上？（profile 与 0x92）')) return;
+    try{ await applySnapshot(s) }catch(e){ log('恢复失败：'+e.message,'t-err') }
+  }
+  if(el.dataset.del != null){ arr.splice(+el.dataset.del, 1); storeSnaps(arr); renderSnaps() }
+};
+$('btnSnap').onclick = async () => { try{ await takeSnapshot('手动') }catch(e){ log('抓快照失败：'+e.message,'t-err') } };
+$('btnManualRestore').onclick = async () => {
+  const ph = $('manualProfile').value.trim(), ch = $('manualCfg').value.trim();
+  if(!ph && !ch){ alert('先填一个要写回的值'); return }
+  if(!confirm('按输入的值写回车上？')) return;
+  try{
+    if(ph){
+      const v = parseInt(ph, 16);
+      if(isNaN(v) || v < 0 || v > 255) throw new Error('Profile 应该是 00-FF');
+      await link.writeProf(v);
+      const b = await link.readReg(GROUP_PROFILE, 0x00, 1);
+      log(`手动写回 profile ${hex2(v)} → 回读 ${hex2(b[0])}`, b[0] === v ? 't-ok' : 't-err');
+    }
+    if(ch){
+      const v = parseInt(ch, 16);
+      if(isNaN(v) || v < 0 || v > 255) throw new Error('0x92 应该是 00-FF');
+      await link.writeCfg(v);
+      const b = await link.readReg(GROUP_DIS, 0x92, 2);
+      log(`手动写回 0x92 ${hex2(v)} → 回读 ${hex2(b[0])}`, b[0] === v ? 't-ok' : 't-err');
+    }
+  }catch(e){ log('手动写回失败：'+e.message,'t-err') }
+};
+$('btnExportSnaps').onclick = () => {
+  const payload = { sn: link.sn || '', exported: new Date().toISOString(), snapshots: loadSnaps() };
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+  a.download = `bfg-snapshots-${Date.now()}.json`;
+  a.click();
+};
+$('btnImportSnaps').onclick = () => $('fileImport').click();
+$('fileImport').onchange = async (ev) => {
+  const f = ev.target.files[0]; if(!f) return;
+  try{
+    const j = JSON.parse(await f.text());
+    const arr = Array.isArray(j) ? j : j.snapshots;
+    if(!Array.isArray(arr)) throw new Error('JSON 里没有 snapshots 数组');
+    storeSnaps(arr.concat(loadSnaps())); renderSnaps();
+    log(`已导入 ${arr.length} 条快照`, 't-ok');
+  }catch(e){ log('导入失败：'+e.message,'t-err') }
+  ev.target.value = '';
+};
+renderSnaps();
+
 $('btnWriteProfile').onclick = async ()=>{
   const p = parseInt($('profileOut').value,16);
   if(!confirm(`确认写入 Profile 0x${p.toString(16).toUpperCase()}？`)) return;
   try{
+    try{ await takeSnapshot('写前') }catch(e){ log('写前快照失败（继续写入）：'+e.message,'t-dim') }
     await link.writeProf(p);
     log('写 Profile 已确认：0x'+p.toString(16).toUpperCase(),'t-ok');
     const back = await link.readReg(GROUP_PROFILE,0x00,1);
@@ -487,6 +624,7 @@ $('btnWriteCfg').onclick = async ()=>{
   const cfg = (cur & 0xF0) | volt;
   if(!confirm(`确认写入 DIS 配置 0x${cfg.toString(16).toUpperCase()}？（此前读到 0x${cur.toString(16).toUpperCase()}）`)) return;
   try{
+    try{ await takeSnapshot('写前') }catch(e){ log('写前快照失败（继续写入）：'+e.message,'t-dim') }
     await link.writeCfg(cfg);
     log('写 DIS 配置已确认：0x'+cfg.toString(16).toUpperCase(),'t-ok');
     const back = await link.readReg(GROUP_DIS,0x92,2);
