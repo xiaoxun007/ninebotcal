@@ -1,0 +1,29 @@
+﻿{
+  "name": "N2GCC2112A0001",
+  "precomm_plain": "5AA5003E045B00",
+  "precomm_enc1": "5AA5008C90CA0A000062FF0000",
+  "session_key_hex": "00112233445566778899AABBCCDDEEFF",
+  "auth_hex": "000102030405060708090A0B0C0D0E0F",
+  "enc2": [
+    {
+      "plain": "5AA50E3E045D004E32474343323131324130303031",
+      "ctr": 7,
+      "frame": "5AA50EDBD022CB63B90BCB6D84F8287818FD3A1180F53281BE0007"
+    },
+    {
+      "plain": "5AA5013E10011C02",
+      "ctr": 7,
+      "frame": "5AA501DBC47ED72FA31A40990007"
+    },
+    {
+      "plain": "5AA5013E10020031",
+      "ctr": 7,
+      "frame": "5AA501DBC47DCB1CA972BDCE0007"
+    },
+    {
+      "plain": "5AA5023E0102929300",
+      "ctr": 7,
+      "frame": "5AA502DBD57D59BE8B805401630007"
+    }
+  ]
+}

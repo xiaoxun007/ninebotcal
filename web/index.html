@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="description" content="浏览器里的 Segway-Ninebot BFG 计量板 / 仪表电量校准工具，Web Bluetooth + Encryption2，无需 App、无需 root。" />
+<meta name="theme-color" content="#0b0f14" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0f14'/%3E%3Cpath d='M16 6l7 4v7c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9v-7z' fill='none' stroke='%2339d98a' stroke-width='2.2'/%3E%3Cpath d='M11.5 16.5l3 3 6-6' fill='none' stroke='%2339d98a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<title>BFG 电量校准 · Web 版（Ninebot BLE）</title>
+<style>
+  :root{--bg:#0b0f14;--card:#121a23;--line:#1f2b38;--fg:#e8eef6;--dim:#8ea3b8;--acc:#39d98a;--warn:#ffb020;--err:#ff5c5c}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;padding:16px;max-width:920px;margin:0 auto}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  label{color:var(--dim);font-size:12px;display:block;margin-bottom:4px}
+  input,select{background:#0d141c;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:9px 10px;font-size:14px;min-width:0}
+  input{flex:1}
+  button{background:#1b2836;color:var(--fg);border:1px solid var(--line);border-radius:9px;padding:9px 13px;font-size:14px;cursor:pointer}
+  button.primary{background:var(--acc);color:#04150c;border-color:transparent;font-weight:600}
+  button.danger{background:#3a1d1d;border-color:#5a2a2a;color:#ffb3b3}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  #log{background:#070b10;border:1px solid var(--line);border-radius:10px;padding:10px;height:260px;overflow:auto;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
+  .t-ok{color:var(--acc)}.t-tx{color:#6fb3ff}.t-rx{color:#ffd479}.t-err{color:var(--err)}.t-dim{color:var(--dim)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#16222f;color:var(--dim);font-size:12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+  .warnbox{border-color:#4a3311;background:#20180a;color:#ffd479}
+</style>
+</head>
+<body>
+<h1>BFG 电量校准 · Web 版</h1>
+<div class="sub">Web Bluetooth / BLE UART（6e400001…）· 协议与 Android 版 5.0.35 一致 · 只在 Chrome / Edge / Android Chrome / iOS 上的 Bluefy 可用</div>
+
+<div class="card">
+  <div class="row">
+    <button id="btnConnect" class="primary">扫描并连接</button>
+    <button id="btnDisconnect" disabled>断开</button>
+    <span id="status" class="pill">未连接</span>
+  </div>
+  <div class="grid" style="margin-top:10px">
+    <div><label>设备名（用作出厂密码，连上后自动填充）</label><input id="devName" placeholder="例如 N2GCC2112A0001" /></div>
+    <div><label>BLE 密码 16 字节（hex，32 字符；留空=用设备名）</label><input id="pwdHex" placeholder="留空则 name 补 0 到 16 字节" /></div>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button id="btnPrecomm" disabled>1. PRE_COMM 取 authParam/SN</button>
+    <button id="btnAuth" disabled>2. AUTH 认证</button>
+    <button id="btnReadAll" disabled>3. 读全部寄存器</button>
+  </div>
+</div>
+
+<div class="card">
+  <label>车辆状态</label>
+  <table>
+    <tbody id="stateTable">
+      <tr><th>设备</th><td id="vName">-</td></tr>
+      <tr><th>SN</th><td id="vSn">-</td></tr>
+      <tr><th>authParam</th><td id="vAuth">-</td></tr>
+      <tr><th>Profile</th><td id="vProfile">-</td></tr>
+      <tr><th>容量 / 电压档</th><td id="vCap">-</td></tr>
+      <tr><th>capacity_core 0x1C</th><td id="vCore">-</td></tr>
+      <tr><th>DIS SOC 0xB5 / 0x1A / 0xB1</th><td id="vDis">-</td></tr>
+      <tr><th>DIS 配置 0x92</th><td id="vCfg">-</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <label>写入（危险操作，先读再写）</label>
+  <div class="grid">
+    <div>
+      <label>容量档（高半字节）</label>
+      <select id="selCap"></select>
+    </div>
+    <div>
+      <label>电压档（低半字节）</label>
+      <select id="selVolt">
+        <option value="1">72V</option>
+        <option value="2">60V</option>
+        <option value="3">48V</option>
+      </select>
+    </div>
+    <div>
+      <label>目标 Profile（自动算）</label>
+      <input id="profileOut" readonly />
+    </div>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button id="btnWriteProfile" class="danger" disabled>写 Profile（仪表 0x10/reg0x00）</button>
+    <button id="btnWriteCfg" class="danger" disabled>写 DIS 配置（0x01/reg0x92）</button>
+    <button id="btnReread" disabled>回读校验</button>
+  </div>
+</div>
+
+<div class="card">
+  <label>配对 / 换密钥（车端需按键确认）</label>
+  <div class="row">
+    <button id="btnPair" class="danger" disabled>生成新密钥并 SET_PWD</button>
+    <button id="btnCopyKey">复制上次生成的新密钥</button>
+  </div>
+  <div class="sub" style="margin:8px 0 0">成功后官方九号 App 的旧凭据可能失效，需要重新配对；新密钥请立即保存。</div>
+</div>
+
+<div class="card">
+  <label>协议日志</label>
+  <div id="log"></div>
+  <div class="row" style="margin-top:8px">
+    <button id="btnClear">清空</button>
+    <button id="btnCopy">复制日志</button>
+  </div>
+</div>
+
+<footer style="color:var(--dim);font-size:12px;text-align:center;margin:16px 0 10px;line-height:1.7">
+  BFG Calibrator · MIT License · 单文件、零依赖、无任何网络请求<br />
+  写入会改变车辆电量显示口径，请先读后写
+</footer>
+
+<script>
+/* ==== BEGIN-CRYPTO ==== */
+/* ============================================================
+ *  1. 常量（来自 com.bfgtools.calibration.imported 5.0.35 的 u2.h / u2.i）
+ * ============================================================ */
+const SVC_UART   = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const CHR_WRITE  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const CHR_NOTIFY = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const CONST16    = hex('97CFB802844143DE56002B3B34780A5D');
+
+const CAP_TABLE = [20000,10500,18000,36000,10500,26000,14000,38000,13000,22000,39000,45000,46000,55000,52000,18000];
+const VOLT_CODE = {72:1, 60:2, 48:3};
+const VOLT_BY_CODE = {1:72, 2:60, 3:48};
+
+const CMD_READ = 0x01, CMD_WRITE = 0x02, CMD_READ_ACK = 0x04, CMD_WRITE_ACK = 0x05;
+const CMD_PRECOMM = 0x5B, CMD_SETPWD = 0x5C, CMD_AUTH = 0x5D;
+const GROUP_PROFILE = 0x10, GROUP_DIS = 0x01;
+
+const REGS = [
+  {group:GROUP_PROFILE, reg:0x00, len:1, name:'profile'},
+  {group:GROUP_PROFILE, reg:0x02, len:1, name:'SOC(profile)'},
+  {group:GROUP_PROFILE, reg:0x1C, len:2, name:'capacity_core'},
+  {group:GROUP_DIS, reg:0x1A, len:2, name:'DIS version'},
+  {group:GROUP_DIS, reg:0x1E, len:2, name:'DIS energy'},
+  {group:GROUP_DIS, reg:0x3D, len:2, name:'DIS BFG version'},
+  {group:GROUP_DIS, reg:0x44, len:2, name:'DIS remaining capacity'},
+  {group:GROUP_DIS, reg:0x92, len:2, name:'DIS voltage config'},
+  {group:GROUP_DIS, reg:0xB1, len:2, name:'DIS voltage'},
+  {group:GROUP_DIS, reg:0xB5, len:2, name:'DIS SOC'},
+];
+
+/* ============================================================
+ *  2. 工具
+ * ============================================================ */
+function hex(s){s=s.replace(/0x/i,'').replace(/\s/g,'');const a=new Uint8Array(s.length/2);for(let i=0;i<a.length;i++)a[i]=parseInt(s.substr(i*2,2),16);return a;}
+function toHex(u8){return Array.from(u8,(b)=>b.toString(16).padStart(2,'0')).join('').toUpperCase();}
+function concat(...arrs){const n=arrs.reduce((s,a)=>s+a.length,0);const o=new Uint8Array(n);let p=0;for(const a of arrs){o.set(a,p);p+=a.length;}return o;}
+function le16(u8,off){return (u8[off]|(u8[off+1]<<8))>>>0;}
+const logEl=document.getElementById('log');
+function log(msg,cls=''){const t=new Date().toISOString().slice(11,23);const line=document.createElement('div');if(cls)line.className=cls;line.textContent=`[${t}] ${msg}`;logEl.appendChild(line);logEl.scrollTop=logEl.scrollHeight;}
+
+/* ============================================================
+ *  3. 加密（Encryption1 = XOR 掩码 + 校验；Encryption2 = CTR + CBC-MAC）
+ *     与 u2.o 逐行对应；AES 用 WebCrypto 的 AES-CBC(IV=0) 模拟单块 ECB
+ * ============================================================ */
+let aesKeyCache = null;
+async function aesBlock(keyBytes, block){
+  const key = await crypto.subtle.importKey('raw', keyBytes, {name:'AES-CBC'}, false, ['encrypt']);
+  const out = new Uint8Array(await crypto.subtle.encrypt({name:'AES-CBC', iv:new Uint8Array(16)}, key, block));
+  return out.slice(0,16); // CBC+IV=0 的第一块 == ECB(block)
+}
+async function sha1(...parts){
+  const all = concat(...parts);
+  return new Uint8Array(await crypto.subtle.digest('SHA-1', all));
+}
+function pwd16FromString(s){
+  let raw = new TextEncoder().encode(s||'');
+  if(raw.length>16) raw = raw.slice(raw.length-16);
+  const out = new Uint8Array(16); out.set(raw); return out;
+}
+
+class BfgCrypto{
+  constructor(passwordBytes16){
+    this.pw = passwordBytes16;
+    this.sessionKey = null;
+    this.auth = null;
+  }
+  async init(){
+    this.maskKey = (await sha1(this.pw, CONST16)).slice(0,16);
+    this.maskBlock = await aesBlock(this.maskKey, CONST16);
+  }
+  xorBody(body){const o=new Uint8Array(body.length);for(let i=0;i<body.length;i++)o[i]=body[i]^this.maskBlock[i&15];return o;}
+  /* 明文帧 [5A A5 len ...payload] -> Encryption1 帧 */
+  enc1(plain){
+    const body = plain.slice(3);
+    const chk = (~body.reduce((s,b)=>s+b,0)) & 0xFFFF;
+    return concat(plain.slice(0,3), this.xorBody(body), new Uint8Array([0,0,chk&0xFF,(chk>>8)&0xFF,0,0]));
+  }
+  dec1(frame){
+    return concat(frame.slice(0,3), this.xorBody(frame.slice(3, frame.length-6)));
+  }
+  async setSession(password16, auth16){
+    this.sessionKey = (await sha1(password16, auth16)).slice(0,16);
+    this.auth = auth16;
+  }
+  nonce(ctr){
+    const n = new Uint8Array(13);
+    n[2]=(ctr>>8)&0xFF; n[3]=ctr&0xFF; n.set(this.auth.slice(0,8),4);
+    return n;
+  }
+  async ctrXor(ctr, data){
+    const out = new Uint8Array(data.length), n = this.nonce(ctr);
+    for(let blk=0; blk<data.length; blk+=16){
+      const ctrBlock = concat(new Uint8Array([1]), n, new Uint8Array([0,(blk/16+1)&0xFF]));
+      const ks = await aesBlock(this.sessionKey, ctrBlock);
+      for(let i=0;i<Math.min(16,data.length-blk);i++) out[blk+i]=data[blk+i]^ks[i];
+    }
+    return out;
+  }
+  async mac(ctr, frame){
+    const body = frame.slice(3), n = this.nonce(ctr);
+    const first = concat(new Uint8Array([0x59]), n, new Uint8Array([0, body.length&0xFF]));
+    const hdr = new Uint8Array(16); hdr.set(frame.slice(0,3));
+    let chain = await aesBlock(this.sessionKey, first);
+    const x = new Uint8Array(16); for(let i=0;i<16;i++) x[i]=chain[i]^hdr[i];
+    chain = await aesBlock(this.sessionKey, x);
+    for(let blk=0; blk<body.length; blk+=16){
+      const chunk = new Uint8Array(16); chunk.set(body.slice(blk, blk+16));
+      const y = new Uint8Array(16); for(let i=0;i<16;i++) y[i]=chain[i]^chunk[i];
+      chain = await aesBlock(this.sessionKey, y);
+    }
+    const tail = await aesBlock(this.sessionKey, concat(new Uint8Array([1]), n, new Uint8Array([0,0])));
+    const mac = new Uint8Array(4); for(let i=0;i<4;i++) mac[i]=chain[i]^tail[i];
+    return mac;
+  }
+  async enc2(ctr, plain){
+    const body = await this.ctrXor(ctr, plain.slice(3));
+    const mac = await this.mac(ctr, plain);
+    return concat(plain.slice(0,3), body, mac, new Uint8Array([(ctr>>8)&0xFF, ctr&0xFF]));
+  }
+  async dec2(frame){
+    const ctr = (frame[frame.length-2]<<8)|frame[frame.length-1];
+    const plain = await this.ctrXor(ctr, frame.slice(3, frame.length-6));
+    const full = concat(frame.slice(0,3), plain);
+    const mac = await this.mac(ctr, full);
+    const ok = mac.every((b,i)=>b===frame[frame.length-6+i]);
+    return {ctr, macOk:ok, plain:full};
+  }
+}
+/* ==== END-CRYPTO ==== */
+
+/* ============================================================
+ *  4. 帧构造
+ * ============================================================ */
+const frameRead      = (g,r,l)=> new Uint8Array([0x5A,0xA5,0x01,0x3E,g,CMD_READ,r,l]);
+const frameWriteProf = (p)=> new Uint8Array([0x5A,0xA5,0x01,0x3E,GROUP_PROFILE,CMD_WRITE,0x00,p]);
+const frameWriteCfg  = (c)=> new Uint8Array([0x5A,0xA5,0x02,0x3E,GROUP_DIS,CMD_WRITE,0x92,c,0x00]);
+const framePreComm   = ()=> new Uint8Array([0x5A,0xA5,0x00,0x3E,0x04,CMD_PRECOMM,0x00]);
+const frameAuth      = (sn14)=> concat(new Uint8Array([0x5A,0xA5,0x0E,0x3E,0x04,CMD_AUTH,0x00]), sn14.slice(0,14));
+const frameSetPwd    = (k32) => concat(new Uint8Array([0x5A,0xA5,0x20,0x3E,0x04,CMD_SETPWD,0x00]), k32.slice(0,32));
+
+/* ============================================================
+ *  5. BLE 链路
+ * ============================================================ */
+class BfgLink{
+  constructor(){
+    this.device=null; this.peripheral=null; this.writeChr=null; this.notifyChr=null;
+    this.crypto=null; this.txCounter=2; this.authorized=false;
+    this.queue=[]; this.pending=null; this.buffer=new Uint8Array(0);
+  }
+  async connect({onLog}){
+    if(!navigator.bluetooth) throw new Error('此浏览器不支持 Web Bluetooth（iOS Safari 请用 Bluefy）');
+    this.onLog = onLog || log;
+    const device = await navigator.bluetooth.requestDevice({
+      filters:[{services:[SVC_UART]}],
+      optionalServices:[SVC_UART],
+      acceptAllDevices:false,
+    }).catch(async (e)=>{
+      this.onLog('按 service 过滤失败，改为全量设备：'+e.message,'t-dim');
+      return navigator.bluetooth.requestDevice({acceptAllDevices:true, optionalServices:[SVC_UART]});
+    });
+    this.device = device;
+    this.onLog(`设备：${device.name||'(无名)'} / ${device.id}`,'t-ok');
+    device.addEventListener('gattserverdisconnected',()=>{this.onLog('GATT 断开','t-err');document.getElementById('status').textContent='已断开';});
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC_UART);
+    const chars = await svc.getCharacteristics();
+    this.writeChr  = chars.find(c=>c.uuid===CHR_WRITE);
+    this.notifyChr = chars.find(c=>c.uuid===CHR_NOTIFY);
+    if(!this.writeChr||!this.notifyChr) throw new Error('未找到 NUS 读写特征');
+    this.notifyChr.addEventListener('characteristicvaluechanged', e=>this.onNotify(e.target.value));
+    await this.notifyChr.startNotifications();
+    this.onLog('已订阅 6e400003 通知','t-ok');
+    return device.name || '';
+  }
+  async disconnect(){
+    try{ if(this.device?.gatt?.connected) this.device.gatt.disconnect(); }catch(e){}
+  }
+  /* 发送原始字节（分片写入，默认 20 字节一片） */
+  async writeRaw(bytes, chunk=20){
+    const noRsp = this.writeChr.properties?.writeWithoutResponse === true;
+    for(let i=0;i<bytes.length;i+=chunk){
+      const part = bytes.slice(i, i+chunk);
+      try{
+        if(noRsp) await this.writeChr.writeValueWithoutResponse(part);
+        else      await this.writeChr.writeValueWithResponse(part);
+      }catch(e){
+        if(noRsp) await this.writeChr.writeValueWithResponse(part);
+        else      await this.writeChr.writeValueWithoutResponse(part);
+      }
+    }
+  }
+  resetBuffer(){ this.buffer = new Uint8Array(0); clearTimeout(this.frameTimer); }
+  /* BLE 通知是分片到达的：攒 120ms 无新数据视为一帧结束 */
+  onNotify(dv){
+    const chunk = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    this.buffer = concat(this.buffer, chunk);
+    clearTimeout(this.frameTimer);
+    this.frameTimer = setTimeout(()=>this.flushFrame(), 120);
+  }
+  flushFrame(){
+    if(this.buffer.length < 9) return;
+    const frame = this.buffer.slice();
+    this.buffer = new Uint8Array(0);
+    this.onLog('RX '+toHex(frame),'t-rx');
+    const waiter = this.pending; this.pending = null;
+    if(waiter) waiter(frame);
+  }
+  /** 发送一帧并等待下一帧回复（pre-comm 用 enc1，之后用 enc2） */
+  async transact(plainFrame, {preauth=false, timeout=4000}={}){
+    const frame = preauth ? this.crypto.enc1(plainFrame)
+                          : await this.crypto.enc2(this.txCounter++, plainFrame);
+    this.onLog('TX '+toHex(frame),'t-tx');
+    const reply = new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{this.pending=null;reject(new Error('等待回复超时'));},timeout);
+      this.pending=(f)=>{clearTimeout(timer);resolve(f);};
+    });
+    this.resetBuffer();
+    await this.writeRaw(frame);
+    const raw = await reply;
+    if(preauth) return this.crypto.dec1(raw);
+    const {macOk, plain, ctr} = await this.crypto.dec2(raw);
+    if(!macOk) throw new Error('Encryption2 MAC 校验失败');
+    this.txCounter = Math.max(this.txCounter, ctr + 1);
+    return plain;
+  }
+  /* ---------- 业务流程 ---------- */
+  async preComm(password16){
+    this.crypto = new BfgCrypto(password16);
+    await this.crypto.init();
+    const r = await this.transact(framePreComm(), {preauth:true});
+    if(!(r[4]===0x3E && r[5]===CMD_PRECOMM)) throw new Error('PRE_COMM 回复格式不符：'+toHex(r));
+    const authParam = r.slice(7,23);
+    const sn = new TextDecoder().decode(r.slice(23,37)).replace(/\0/g,'').trim();
+    this.authParam = authParam; this.sn = sn;
+    return {authParam, sn, status:r[6]};
+  }
+  async auth(password16, {fresh=false}={}){
+    await this.crypto.setSession(password16, this.authParam);
+    this.txCounter = 2;
+    const r = await this.transact(frameAuth(pad14(this.sn)));
+    if(r[5]!==CMD_AUTH || r[6]!==1) throw new Error('AUTH 被拒绝：'+toHex(r));
+    this.authorized = true;
+    return true;
+  }
+  async readReg(group, reg, len){
+    const r = await this.transact(frameRead(group, reg, len));
+    if(r[5]!==CMD_READ_ACK || r[6]!==reg) throw new Error(`读 0x${reg.toString(16)} 回复不符：`+toHex(r));
+    return r.slice(7, 7+len);
+  }
+  async writeProf(profile){
+    const r = await this.transact(frameWriteProf(profile));
+    if(r[5]!==CMD_WRITE_ACK) throw new Error('写 Profile 未收到 WRITE_ACK：'+toHex(r));
+    return r;
+  }
+  async writeCfg(cfg){
+    const r = await this.transact(frameWriteCfg(cfg));
+    if(r[5]!==CMD_WRITE_ACK) throw new Error('写 DIS 配置未收到 WRITE_ACK：'+toHex(r));
+    return r;
+  }
+  async setPwd(newKey32){
+    const r = await this.transact(frameSetPwd(newKey32), {timeout:60000});
+    if(r[5]!==CMD_SETPWD || r[6]!==1) throw new Error('SET_PWD 失败：'+toHex(r));
+    return r;
+  }
+}
+function pad14(sn){
+  const out=new Uint8Array(14); const raw=new TextEncoder().encode(sn||'');
+  out.set(raw.slice(0,14)); return out;
+}
+
+/* ============================================================
+ *  6. UI
+ * ============================================================ */
+const link = new BfgLink();
+const $=(id)=>document.getElementById(id);
+let lastNewKey = null, lastState = {};
+
+function fillCaps(){
+  const sel=$('selCap');
+  CAP_TABLE.forEach((c,i)=>{const o=document.createElement('option');o.value=i;o.textContent=`${i} · ${c} mAh`;sel.appendChild(o);});
+  sel.value = 3;
+  sel.onchange = updateProfileOut; $('selVolt').onchange = updateProfileOut; updateProfileOut();
+}
+function updateProfileOut(){ $('profileOut').value = '0x'+((( +$('selCap').value)<<4 | (+$('selVolt').value)).toString(16).toUpperCase().padStart(2,'0')); }
+
+function setConnected(name){
+  $('status').textContent = '已连接';
+  $('btnDisconnect').disabled=false;
+  ['btnPrecomm'].forEach(id=>$(id).disabled=false);
+  $('devName').value = $('devName').value || (name||'');
+}
+function markAuth(){
+  $('btnAuth').disabled=true; $('btnReadAll').disabled=false;
+  $('btnWriteProfile').disabled=false; $('btnWriteCfg').disabled=false; $('btnReread').disabled=false; $('btnPair').disabled=false;
+}
+
+$('btnConnect').onclick = async ()=>{
+  try{
+    const name = await link.connect({onLog:log});
+    setConnected(name);
+  }catch(e){ log('连接失败：'+e.message,'t-err'); }
+};
+$('btnDisconnect').onclick = async ()=>{ await link.disconnect(); $('status').textContent='已断开'; log('已断开','t-dim'); };
+
+$('btnPrecomm').onclick = async ()=>{
+  try{
+    const hexPwd = $('pwdHex').value.trim();
+    const pwd = hexPwd ? hex(hexPwd) : pwd16FromString($('devName').value);
+    if(pwd.length!==16) throw new Error('密码必须是 16 字节');
+    const {authParam, sn, status} = await link.preComm(pwd);
+    $('vName').textContent = $('devName').value;
+    $('vSn').textContent = sn || '(空)';
+    $('vAuth').textContent = toHex(authParam);
+    log(`PRE_COMM ok status=${status} SN=${sn} auth=${toHex(authParam)}`,'t-ok');
+    $('btnAuth').disabled=false;
+  }catch(e){ log('PRE_COMM 失败：'+e.message,'t-err'); }
+};
+
+$('btnAuth').onclick = async ()=>{
+  try{
+    const hexPwd = $('pwdHex').value.trim();
+    const pwd = hexPwd ? hex(hexPwd) : pwd16FromString($('devName').value);
+    await link.auth(pwd);
+    log('AUTH 成功，已建立 Encryption2 会话','t-ok');
+    markAuth();
+  }catch(e){ log('AUTH 失败：'+e.message,'t-err'); }
+};
+
+$('btnReadAll').onclick = async ()=>{
+  try{
+    const st = {};
+    for(const r of REGS){
+      const data = await link.readReg(r.group, r.reg, r.len);
+      st[r.name] = toHex(data);
+      log(`读 ${r.name} 0x${r.reg.toString(16).padStart(2,'0')} → ${toHex(data)} (${r.len===2?le16(data,0):data[0]})`,'t-ok');
+    }
+    lastState = st;
+    const p = st['profile'] ? parseInt(st['profile'],16) : null;
+    if(p!=null){
+      $('vProfile').textContent = '0x'+st['profile']+' ('+ (VOLT_BY_CODE[p&0x0F]||'?') +'V / '+ (CAP_TABLE[(p>>4)&0x0F] ?? '?') +' mAh)';
+    }
+    if(st['capacity_core']) $('vCore').textContent = st['capacity_core']+' = '+le16(hex(st['capacity_core']),0);
+    $('vDis').textContent = [st['DIS SOC'], st['DIS version'], st['DIS voltage']].map(x=>x||'-').join(' / ');
+    if(st['DIS voltage config']) $('vCfg').textContent = st['DIS voltage config'];
+    if(p!=null){ $('selCap').value=(p>>4)&0x0F; $('selVolt').value=(p&0x0F)||1; updateProfileOut(); }
+  }catch(e){ log('读取失败：'+e.message,'t-err'); }
+};
+
+$('btnWriteProfile').onclick = async ()=>{
+  const p = parseInt($('profileOut').value,16);
+  if(!confirm(`确认写入 Profile 0x${p.toString(16).toUpperCase()}？`)) return;
+  try{
+    await link.writeProf(p);
+    log('写 Profile 已确认：0x'+p.toString(16).toUpperCase(),'t-ok');
+    const back = await link.readReg(GROUP_PROFILE,0x00,1);
+    log('回读 profile = 0x'+toHex(back), back[0]===p?'t-ok':'t-err');
+  }catch(e){ log('写 Profile 失败：'+e.message,'t-err'); }
+};
+
+$('btnWriteCfg').onclick = async ()=>{
+  const cur = lastState['DIS voltage config'] ? parseInt(lastState['DIS voltage config'],16) : null;
+  if(cur==null){ alert('先点“读全部寄存器”，拿到 0x92 的原始值再写（高半字节必须保留）。'); return; }
+  const volt = {72:1,60:2,48:3}[+prompt('目标电压 72/60/48', '72')];
+  if(!volt) return;
+  const cfg = (cur & 0xF0) | volt;
+  if(!confirm(`确认写入 DIS 配置 0x${cfg.toString(16).toUpperCase()}？（此前读到 0x${cur.toString(16).toUpperCase()}）`)) return;
+  try{
+    await link.writeCfg(cfg);
+    log('写 DIS 配置已确认：0x'+cfg.toString(16).toUpperCase(),'t-ok');
+    const back = await link.readReg(GROUP_DIS,0x92,2);
+    log('回读 0x92 = '+toHex(back),'t-dim');
+  }catch(e){ log('写 DIS 配置失败：'+e.message,'t-err'); }
+};
+
+$('btnPair').onclick = async ()=>{
+  if(!confirm('这会改写车端 BLE 密码，官方 App 可能需要重新配对。继续？')) return;
+  try{
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    lastNewKey = toHex(key);
+    log('新密钥（32 字节）：'+lastNewKey,'t-dim');
+    await link.setPwd(key);
+    log('SET_PWD 成功；请立即保存新密钥','t-ok');
+    localStorage.setItem('bfg_last_key', lastNewKey);
+  }catch(e){ log('SET_PWD 失败（需在车上按键确认）：'+e.message,'t-err'); }
+};
+$('btnCopyKey').onclick = ()=>{ const k=localStorage.getItem('bfg_last_key')||lastNewKey||''; navigator.clipboard?.writeText(k); log('已复制：'+k,'t-dim'); };
+$('btnClear').onclick = ()=>{ logEl.innerHTML=''; };
+$('btnCopy').onclick = ()=> navigator.clipboard?.writeText(logEl.innerText);
+
+fillCaps();
+log('常量已加载。先点“扫描并连接”，再依次 PRE_COMM → AUTH → 读全部。','t-dim');
+if(!navigator.bluetooth) log('当前环境没有 navigator.bluetooth：iOS 请用 Bluefy 打开本页，桌面请用 Chrome/Edge。','t-err');
+</script>
+</body>
+</html>
